@@ -1,16 +1,15 @@
 import os
 import hashlib
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timezone, timedelta
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 app = FastAPI(title="Protected App Key Server")
 
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 
-# Temporary in-memory licenses
-# Railway restart hone par ye reset ho jayenge.
 LICENSES = {}
 
 
@@ -36,87 +35,87 @@ def health():
 
 @app.post("/verify")
 def verify(body: VerifyRequest):
-    lic = LICENSES.get(body.license_key)
+    license_data = LICENSES.get(body.license_key)
 
-    if not lic:
-        raise HTTPException(status_code=403, detail="invalid_license")
+    if not license_data:
+        raise HTTPException(
+            status_code=403,
+            detail="invalid_license"
+        )
 
-    if lic["revoked"]:
-        raise HTTPException(status_code=403, detail="license_revoked")
+    if license_data["revoked"]:
+        raise HTTPException(
+            status_code=403,
+            detail="license_revoked"
+        )
 
-    if datetime.now(timezone.utc) >= lic["expires_at"]:
-        raise HTTPException(status_code=403, detail="license_expired")
+    if datetime.now(timezone.utc) >= license_data["expires_at"]:
+        raise HTTPException(
+            status_code=403,
+            detail="license_expired"
+        )
 
-    devices = lic["devices"]
+    devices = license_data["devices"]
 
     if body.device_id not in devices:
-        if len(devices) >= lic["max_devices"]:
+        if len(devices) >= license_data["max_devices"]:
             raise HTTPException(
                 status_code=403,
                 detail="device_limit_reached"
             )
+
         devices.add(body.device_id)
 
     return {
         "ok": True,
-        "expires_at": lic["expires_at"].isoformat()
+        "expires_at": license_data["expires_at"].isoformat()
     }
 
 
 @app.post("/admin/create-key")
 def create_key(
     body: CreateKeyRequest,
-    x_admin_secret: str | None = None
+    x_admin_secret: str | None = Header(default=None)
 ):
-    if not ADMIN_SECRET or x_admin_secret != ADMIN_SECRET:
-        raise HTTPException(status_code=401, detail="unauthorised")
+    if not ADMIN_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="ADMIN_SECRET_not_configured"
+        )
+
+    if not secrets.compare_digest(
+        x_admin_secret or "",
+        ADMIN_SECRET
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="unauthorised"
+        )
 
     if body.days <= 0:
-        raise HTTPException(status_code=400, detail="invalid_days")
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_days"
+        )
 
     if body.max_devices <= 0:
-        raise HTTPException(status_code=400, detail="invalid_max_devices")
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_max_devices"
+        )
 
-    raw = os.urandom(18)
-    key = "ENC-" + hashlib.sha256(raw).hexdigest()[:24].upper()
+    raw = os.urandom(32)
 
-    expires = datetime.now(timezone.utc).replace(
-        microsecond=0
+    license_key = (
+        "ENC-" +
+        hashlib.sha256(raw).hexdigest()[:24].upper()
     )
 
-    from datetime import timedelta
-    expires += timedelta(days=body.days)
+    expires_at = (
+        datetime.now(timezone.utc)
+        + timedelta(days=body.days)
+    ).replace(microsecond=0)
 
-    LICENSES[key] = {
-        "expires_at": expires,
-        "max_devices": body.max_devices,
-        "devices": set(),
-        "revoked": False
-    }
-
-    return {
-        "ok": True,
-        "license_key": key,
-        "expires_at": expires.isoformat(),
-        "max_devices": body.max_devices
-    }
-
-
-@app.post("/admin/revoke/{license_key}")
-def revoke(
-    license_key: str,
-    x_admin_secret: str | None = None
-):
-    if not ADMIN_SECRET or x_admin_secret != ADMIN_SECRET:
-        raise HTTPException(status_code=401, detail="unauthorised")
-
-    if license_key not in LICENSES:
-        raise HTTPException(status_code=404, detail="license_not_found")
-
-    LICENSES[license_key]["revoked"] = True
-
-    return {
-        "ok": True,
-        "license_key": license_key,
-        "revoked": True
-    }
+    LICENSES[license_key] = {
+        "expires_at": expires_at,
+        "max_devices
